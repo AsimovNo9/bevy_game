@@ -9,6 +9,15 @@ const ANIM_DT: f32 = 0.1;
 #[derive(Component)]
 struct Player;
 
+pub struct PlayerPlugin;
+
+impl Plugin for PlayerPlugin{
+    fn build(&self, app: &mut App){
+        app.add_systems(Startup, spawn_player)
+            .add_systems(Update, (move_player, animate_player));
+    }
+}
+
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 enum Facing{
     Up,
@@ -55,7 +64,7 @@ fn spawn_player(
         Transform::from_translation(Vec3::ZERO),
         Player,
         AnimationState{facing, moving: false, was_moving: false},
-        AnimationTimer(Timer::from_second(ANIM_DT, TimerMode::Repeating)),
+        AnimationTimer(Timer::from_seconds(ANIM_DT, TimerMode::Repeating)),
     ));
 
 }
@@ -63,8 +72,12 @@ fn spawn_player(
 fn move_player(
     input: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
-    mut player_transform: Single<&mut Transform, With<Player>>,
+    mut player: Query<(&mut Transform, & mut AnimationState), With<Player>>,
 ){
+    let Ok((mut transform, mut anim)) = player.single_mut() else{
+        return;
+    };
+
     let mut direction = Vec2::ZERO;
     if input.pressed(KeyCode::ArrowLeft){
         direction.x -=1.0;
@@ -80,10 +93,10 @@ fn move_player(
     }
 
     if direction != Vec2::ZERO{
-        let speed = 300.0;
-        let delta = direction.normalize() *speed * time.delta_secs();
-        player_transform.translation.x += delta.x;
-        player_transform.translation.y += delta.y;
+        let delta = direction.normalize() *MOVE_SPEED * time.delta_secs();
+        transform.translation.x += delta.x;
+        transform.translation.y += delta.y;
+        anim.moving = true;
 
         if direction.x.abs() > direction.y.abs(){
             anim.facing = if direction.x > 0.0 {Facing::Right} else {Facing::Left};
@@ -94,6 +107,72 @@ fn move_player(
     } else {
         anim.moving = false;
     }
-
-
 }
+
+fn animate_player(
+    time: Res<Time>,
+    mut query: Query<(&mut AnimationState, &mut AnimationTimer, &mut Sprite), With<Player>>,
+){
+    let Ok((mut anim, mut timer, mut sprite)) = query.single_mut() else{
+        return;
+    };
+
+    let atlas = match sprite.texture_atlas.as_mut(){
+        Some(a) => a,
+        None => return,
+    };
+
+    // Compute the target row and current position in the atlas (column/row within the 9-column row)
+    let target_row = row_zero_based(anim.facing);
+    let mut current_col = atlas.index % WALK_FRAMES;
+    let mut current_row = atlas.index / WALK_FRAMES;
+
+    // If the facing chaned(or we weren't on a walking row), snap to the first
+    if current_row != target_row{
+        atlas.index = row_start_index(anim.facing);
+        current_col = 0;
+        current_row = target_row;
+        timer.reset();
+    }
+
+    let just_started = anim.moving && !anim.was_moving;
+    let just_stopped = !anim.moving && anim.was_moving;
+
+    if anim.moving{
+        if just_started{
+            let row_start = row_start_index(anim.facing);
+            let next_col = (current_col +1) % WALK_FRAMES;
+            atlas.index = row_start + next_col;
+            timer.reset();
+        }else{
+            timer.tick(time.delta());
+            if timer.just_finished(){
+                let row_start = row_start_index(anim.facing);
+                let next_col = (current_col + 1) % WALK_FRAMES;
+                atlas.index = row_start + next_col;
+            }
+        }
+    } else if just_stopped{
+        timer.reset();
+    }
+    anim.was_moving = anim.moving;
+}
+
+fn row_start_index(facing: Facing) -> usize {
+    row_zero_based(facing) * WALK_FRAMES
+}
+
+fn atlas_index_for(facing: Facing, frame_in_row: usize) -> usize {
+    row_start_index(facing) + frame_in_row.min(WALK_FRAMES -1)
+}
+
+fn row_zero_based(facing: Facing) -> usize {
+    match facing {
+        Facing::Up => 8,
+        Facing::Left => 9,
+        Facing::Down => 10,
+        Facing::Right => 11,
+    }
+}
+
+
